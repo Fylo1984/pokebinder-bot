@@ -360,8 +360,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait.edit_text(res.text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"PokeBinder is running!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
 def main():
     init_db()
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
