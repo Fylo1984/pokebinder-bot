@@ -1,159 +1,144 @@
-import os, json, sqlite3, logging, asyncio, threading, requests
+import os, logging, asyncio, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from io import BytesIO
-from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
-from google import genai
 from google.genai import types
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from extra import *
 
 logging.basicConfig(level=logging.INFO)
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-DB = "pokebinder.db"
-MODEL = "gemini-3.8-flash"
-FLAGS = {"ITA": "🇮🇹 ITA", "JAP": "🇯🇵 JAP", "ENG": "🇬🇧 ENG", "KOR": "🇰🇷 KOR"}
-
-def ask_gemini(contents):
-    for m in [MODEL, "gemini-3.5-flash-lite"]:
-        try:
-            return client.models.generate_content(model=m, contents=contents).text
-        except Exception as e:
-            if any(k in str(e) for k in ("503", "429", "UNAVAILABLE")):
-                continue
-            raise e
-    raise RuntimeError("Server Google occupati (503). Riprova tra 10 secondi.")
-
-def parse_json(txt):
-    return json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
-
-def init_db():
-    with sqlite3.connect(DB) as c:
-        c.execute("CREATE TABLE IF NOT EXISTS cards (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, set_name TEXT, card_number TEXT, lang TEXT, grade TEXT, paid_price REAL, market_price REAL, photo_file_id TEXT, added_at TEXT)")
-
-def add_card(uid, d, paid, pid):
-    with sqlite3.connect(DB) as c:
-        c.execute("INSERT INTO cards (user_id,name,set_name,card_number,lang,grade,paid_price,market_price,photo_file_id,added_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (uid, d.get("name","?"), d.get("set_name","N/D"), d.get("card_number",""), d.get("lang","ENG").upper(), d.get("grade","Raw"), paid, float(d.get("market_price",0)), pid, datetime.now().strftime("%Y-%m-%d")))
-
-def get_cards(uid):
-    with sqlite3.connect(DB) as c:
-        c.row_factory = sqlite3.Row
-        return [dict(r) for r in c.execute("SELECT * FROM cards WHERE user_id=? ORDER BY market_price DESC", (uid,)).fetchall()]
-
-def del_card(cid, uid):
-    with sqlite3.connect(DB) as c:
-        c.execute("DELETE FROM cards WHERE id=? AND user_id=?", (cid, uid))
-
-def fetch_img(name, num):
-    try:
-        r = requests.get(f"https://api.tcgdex.net/v2/en/cards?name={name.split()[0]}", timeout=5)
-        n = num.split("/")[0].lstrip("0")
-        for i in r.json():
-            if i.get("image") and (not n or i.get("localId","").lstrip("0") == n): return f"{i['image']}/high.png"
-        for i in r.json():
-            if i.get("image"): return f"{i['image']}/high.png"
-    except Exception: pass
-    return "https://images.pokemontcg.io/base1/4_hires.png"
-
-def make_portfolio(cards):
-    img = Image.new("RGB", (900, 560), (18, 20, 28))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([20, 20, 880, 540], 24, outline=(212, 175, 55), width=3)
-    d.rounded_rectangle([45, 110, 435, 280], 16, fill=(28, 32, 44))
-    d.rounded_rectangle([465, 110, 855, 280], 16, fill=(28, 32, 44))
-    d.rounded_rectangle([45, 305, 855, 515], 16, fill=(28, 32, 44))
-    ft, fs, fb, fm = ImageFont.load_default(30), ImageFont.load_default(18), ImageFont.load_default(38), ImageFont.load_default(22)
-    tv, tp = sum(c["market_price"] for c in cards), sum(c["paid_price"] for c in cards)
-    pnl = tv - tp
-    pct = (pnl / tp * 100) if tp > 0 else 0.0
-    col = (72, 219, 132) if pnl >= 0 else (255, 95, 95)
-    sgn = "+" if pnl >= 0 else ""
-    d.text((48, 45), "POKEBINDER PRO  |  PORTAFOGLIO", fill=(212, 175, 55), font=ft)
-    d.text((710, 54), f"{len(cards)} Carte", fill=(170, 175, 190), font=fs)
-    d.text((70, 132), "VALORE ATTUALE", fill=(160, 168, 185), font=fs)
-    d.text((70, 170), f"EUR {tv:,.2f}", fill=(255, 255, 255), font=fb)
-    d.text((70, 230), f"Investito: EUR {tp:,.2f}", fill=(140, 148, 165), font=fs)
-    d.text((490, 132), "RENDIMENTO (P&L)", fill=(160, 168, 185), font=fs)
-    d.text((490, 170), f"{sgn}EUR {pnl:,.2f}", fill=col, font=fb)
-    d.text((490, 230), f"{sgn}{pct:.1f}% sul capitale", fill=col, font=fs)
-    d.text((70, 322), "TOP CARTE IN COLLEZIONE", fill=(212, 175, 55), font=fs)
-    y = 360
-    if not cards: d.text((70, y), "Nessuna carta ancora. Invia foto o numero!", fill=(180, 180, 190), font=fm)
-    for i, c in enumerate(cards[:3], 1):
-        d.text((70, y), f"{i}. {c['name']} [{c['lang']}] ({c['grade']}) - EUR {c['market_price']:.2f}"[:62], fill=(240, 242, 248), font=fm)
-        y += 44
-    bio = BytesIO(); bio.name = "portfolio.png"; img.save(bio, "PNG"); bio.seek(0)
-    return bio
 
 def menu_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📖 Sfoglia Binder", callback_data="binder_0"), InlineKeyboardButton("📊 Portafoglio", callback_data="portfolio")], [InlineKeyboardButton("🔥 Radar Mercato", callback_data="radar"), InlineKeyboardButton("➕ Come aggiungere", callback_data="help")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Sfoglia Binder", callback_data="binder_all_0"), InlineKeyboardButton("📊 Portafoglio", callback_data="portfolio")],
+        [InlineKeyboardButton("🔥 Radar Mercato", callback_data="radar"), InlineKeyboardButton("🎯 Wishlist", callback_data="wish_view")],
+        [InlineKeyboardButton("🔄 Aggiorna Prezzi", callback_data="sync_prices"), InlineKeyboardButton("📥 Esporta CSV", callback_data="export_csv")],
+        [InlineKeyboardButton("💾 Backup DB", callback_data="backup_db"), InlineKeyboardButton("➕ Guida", callback_data="help")]
+    ])
 
 async def start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     init_db()
-    await u.message.reply_text("✨ *PokeBinder Pro attivo!*\n\n• 📸 Mandami una *foto* della carta\n• ✍️ Oppure scrivimi *nome e numero* (es. `Magikarp 080/073 JAP`)", parse_mode="Markdown", reply_markup=menu_kb())
+    await u.message.reply_text("✨ *PokeBinder Pro attivo!*\n\n• 📸 Manda una *foto* o scrivi *nome e numero*\n• 💾 Per ripristinare un backup, inviami il file `.db` qui in chat", parse_mode="Markdown", reply_markup=menu_kb())
 
 async def confirm_card(msg, ctx, d, pref):
-    ctx.user_data.update({"card": d, "photo": pref, "wait_price": True})
+    ctx.user_data.update({"card": d, "photo": pref, "wait_price": True, "wait_wish": False})
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Salva (0 €)", callback_data="save0"), InlineKeyboardButton("❌ Annulla", callback_data="cancel")]])
-    await msg.edit_text(f"✨ *{d['name']}* (`{d['card_number']}`)\n📦 _{d['set_name']}_\n🌍 *{FLAGS.get(d['lang'].upper(), d['lang'])}* | 🏷 *{d['grade']}*\n💶 Valore stimato: *{float(d['market_price']):.2f} €*\n\n💰 *Quanto l'hai pagata in Euro?* (scrivi solo il numero)", parse_mode="Markdown", reply_markup=kb)
+    await msg.edit_text(f"✨ *{d['name']}* (`{d['card_number']}`)\n📦 _{d['set_name']}_\n🌍 *{FLAGS.get(d['lang'].upper(), d['lang'])}* | 🏷 *{d['grade']}*\n💶 Valore live: *{float(d['market_price']):.2f} €*\n\n💰 *Quanto l'hai pagata in Euro?* (scrivi solo il numero)", parse_mode="Markdown", reply_markup=kb)
+
+async def on_doc(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = u.message.document
+    if not doc or not doc.file_name.endswith(".db"): return
+    f = await ctx.bot.get_file(doc.file_id)
+    await f.download_to_drive(DB)
+    init_db()
+    await u.message.reply_text("✅ *Backup ripristinato con successo!* Tutte le tue carte e la Wishlist sono tornate online.", parse_mode="Markdown", reply_markup=menu_kb())
 
 async def on_photo(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    w = await u.message.reply_text("🔍 *Analizzo la carta...*", parse_mode="Markdown")
+    w = await u.message.reply_text("🔍 *Analizzo la carta e cerco il prezzo live...*", parse_mode="Markdown")
     f = await ctx.bot.get_file(u.message.photo[-1].file_id)
     b = await f.download_as_bytearray()
-    p = 'Identifica questa carta Pokemon (Raw o gradata). Rispondi SOLO con JSON senza markdown: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw o PSA 10 ecc","market_price":45.50}'
+    p = 'Identifica questa carta Pokemon (Raw o gradata) e cerca il prezzo attuale su Cardmarket/eBay in EUR. Rispondi SOLO con JSON: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}'
     try:
-        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, [types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p]), timeout=20)
+        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, [types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p], True), timeout=30)
         await confirm_card(w, ctx, parse_json(txt), u.message.photo[-1].file_id)
-    except Exception as e:
-        await w.edit_text(f"⚠️ Riprova tra qualche secondo. ({e})")
+    except Exception as e: await w.edit_text(f"⚠️ Riprova tra qualche secondo. ({e})")
 
 async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = u.message.text.strip()
+    if ctx.user_data.get("wait_wish"):
+        try:
+            parts = t.rsplit(",", 1)
+            name, target = parts[0].strip(), float(parts[1].replace("€","").strip())
+            add_wish(u.effective_user.id, name, target)
+            ctx.user_data["wait_wish"] = False
+            await u.message.reply_text(f"🎯 *{name}* aggiunta in Wishlist (Target: *{target:.2f} €*)!", parse_mode="Markdown", reply_markup=menu_kb())
+        except Exception:
+            await u.message.reply_text("✍️ Scrivi nel formato `Nome Numero, Prezzo` (es. `Magikarp 080/073 JAP, 45`).", parse_mode="Markdown")
+        return
     if ctx.user_data.get("wait_price"):
         try:
             paid = float(t.replace(",",".").replace("€","").strip())
-            d, pid = ctx.user_data.pop("card"), ctx.user_data.pop("photo")
-            ctx.user_data["wait_price"] = False
+            d, pid = ctx.user_data.pop("card"), ctx.user_data.pop("photo"); ctx.user_data["wait_price"] = False
             add_card(u.effective_user.id, d, paid, pid)
             await u.message.reply_text(f"🎉 *{d['name']}* salvata nel Binder!", parse_mode="Markdown", reply_markup=menu_kb())
-        except ValueError:
-            await u.message.reply_text("✍️ Scrivi solo il numero in Euro (es. `25`), oppure premi Annulla.")
+        except ValueError: await u.message.reply_text("✍️ Scrivi solo il numero in Euro (es. `25`), oppure premi Annulla.")
         return
-    w = await u.message.reply_text(f"🔎 *Cerco* `{t}`...", parse_mode="Markdown")
-    p = f'Identifica la carta Pokemon "{t}". Rispondi SOLO con JSON senza markdown: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
+    w = await u.message.reply_text(f"🔎 *Cerco* `{t}` *e prezzo live...*", parse_mode="Markdown")
+    p = f'Identifica la carta Pokemon "{t}" e cerca il suo prezzo attuale su Cardmarket/PriceCharting in EUR. Rispondi SOLO con JSON: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
     try:
-        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p), timeout=20)
+        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=30)
         d = parse_json(txt)
         await confirm_card(w, ctx, d, fetch_img(d["name"], d["card_number"]))
-    except Exception as e:
-        await w.edit_text(f"⚠️ Riprova tra qualche secondo ({e}). Es: `Magikarp 080/073 JAP`.")
+    except Exception as e: await w.edit_text(f"⚠️ Riprova tra qualche secondo ({e}). Es: `Magikarp 080/073 JAP`.")
 
 async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid, data = q.from_user.id, q.data
-    if data == "menu": await q.message.reply_text("🏠 *Menu PokeBinder*", parse_mode="Markdown", reply_markup=menu_kb())
-    elif data == "help": await q.message.reply_text("📸 Manda una foto oppure scrivi nome e numero (es. `Umbreon VMAX 215/203 ENG`).", parse_mode="Markdown", reply_markup=menu_kb())
+    if data == "menu": ctx.user_data.clear(); await q.message.reply_text("🏠 *Menu PokeBinder*", parse_mode="Markdown", reply_markup=menu_kb())
+    elif data == "help": await q.message.reply_text("📸 Manda una foto o scrivi nome e numero.\n💾 Salva il file `.db` da *Backup DB* e reinvialo in chat dopo ogni riavvio di Render.", parse_mode="Markdown", reply_markup=menu_kb())
     elif data == "save0" and "card" in ctx.user_data:
         d, pid = ctx.user_data.pop("card"), ctx.user_data.pop("photo"); ctx.user_data["wait_price"] = False
         add_card(uid, d, 0.0, pid)
         await q.edit_message_text(f"🎉 *{d['name']}* salvata (0 €)!", parse_mode="Markdown", reply_markup=menu_kb())
     elif data == "cancel": ctx.user_data.clear(); await q.edit_message_text("❌ Annullato.", reply_markup=menu_kb())
     elif data == "portfolio": await q.message.reply_photo(photo=make_portfolio(get_cards(uid)), caption="📊 *Portafoglio aggiornato*", parse_mode="Markdown", reply_markup=menu_kb())
-    elif data.startswith("binder_"):
+    elif data == "export_csv":
         cards = get_cards(uid)
-        if not cards: return await q.message.reply_text("📭 Binder vuoto! Manda una foto o scrivi il numero carta.", reply_markup=menu_kb())
-        idx = max(0, min(int(data.split("_")[1]), len(cards)-1)); c = cards[idx]; diff = c["market_price"] - c["paid_price"]
-        nav = ([InlineKeyboardButton("⬅️", callback_data=f"binder_{idx-1}")] if idx>0 else []) + [InlineKeyboardButton(f"{idx+1}/{len(cards)}", callback_data="x")] + ([InlineKeyboardButton("➡️", callback_data=f"binder_{idx+1}")] if idx<len(cards)-1 else [])
-        kb = InlineKeyboardMarkup([nav, [InlineKeyboardButton("🗑 Elimina", callback_data=f"del_{c['id']}"), InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
-        await q.message.reply_photo(photo=c["photo_file_id"], caption=f"📖 *Carta {idx+1}/{len(cards)}*\n🃏 *{c['name']}* (`{c['card_number']}`)\n📦 _{c['set_name']}_ | *{FLAGS.get(c['lang'],c['lang'])}* | *{c['grade']}*\n💵 Pagata: *{c['paid_price']:.2f} €* | 💎 Valore: *{c['market_price']:.2f} €* ({'+' if diff>=0 else ''}{diff:.2f} €)", parse_mode="Markdown", reply_markup=kb)
-    elif data.startswith("del_"): del_card(int(data.split("_")[1]), uid); await q.edit_message_caption("🗑 *Carta eliminata.*", parse_mode="Markdown", reply_markup=menu_kb())
-    elif data == "radar":
-        w = await q.message.reply_text("📡 *Scansiono il mercato...*", parse_mode="Markdown")
+        if not cards: return await q.message.reply_text("📭 Binder vuoto!", reply_markup=menu_kb())
+        await q.message.reply_document(document=make_csv(cards), caption="📥 *Esportazione Excel/CSV pronta!*", parse_mode="Markdown", reply_markup=menu_kb())
+    elif data == "backup_db":
+        if not os.path.exists(DB): return await q.message.reply_text("📭 Nessun database da salvare.", reply_markup=menu_kb())
+        with open(DB, "rb") as f: await q.message.reply_document(document=f, filename="pokebinder.db", caption="💾 *Backup salvato!* Per ripristinarlo in futuro, inoltrami questo file qui in chat.", parse_mode="Markdown")
+    elif data == "sync_prices":
+        cards = get_cards(uid)
+        if not cards: return await q.message.reply_text("📭 Binder vuoto!", reply_markup=menu_kb())
+        w = await q.message.reply_text(f"🔄 *Aggiorno le quotazioni live di {len(cards)} carte...*", parse_mode="Markdown")
+        lst = "\n".join([f'{c["id"]}: {c["name"]} {c["card_number"]} {c["lang"]} ({c["grade"]})' for c in cards[:25]])
+        p = f'Cerca il prezzo attuale in EUR su Cardmarket/PriceCharting per queste carte Pokemon:\n{lst}\nRispondi SOLO con un oggetto JSON dove le chiavi sono gli ID e i valori i prezzi numerici, es: {{"1": 45.5, "2": 120.0}}'
         try:
-            txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, "Report breve in italiano sul mercato Pokemon TCG attuale: 4 carte piu cercate e 4 con maggior rivalutazione in EUR. Solo testo ed emoji, senza asterischi."), timeout=20)
-            await w.edit_text(txt, reply_markup=menu_kb())
-        except Exception as e: await w.edit_text(f"⚠️ {e}", reply_markup=menu_kb())
+            res = parse_json(await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=35))
+            for k, v in res.items(): update_price(int(k), uid, v)
+            await w.edit_text("✅ *Quotazioni aggiornate con successo!* Apri il Portafoglio per vedere il nuovo P&L.", parse_mode="Markdown", reply_markup=menu_kb())
+        except Exception as e: await w.edit_text(f"⚠️ Errore aggiornamento: {e}", reply_markup=menu_kb())
+    elif data.startswith("binder_"):
+        _, flt, idx_s = data.split("_"); cards = get_cards(uid, flt)
+        f_kb = [InlineKeyboardButton(l, callback_data=f"binder_{k}_0") for l, k in [("Tutte","all"),("🇯🇵","JAP"),("🇮🇹","ITA"),("🏆","graded"),("📈 P&L","pnl")]]
+        if not cards: return await q.message.reply_text("📭 Nessuna carta con questo filtro.", reply_markup=InlineKeyboardMarkup([f_kb, [InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        idx = max(0, min(int(idx_s), len(cards)-1)); c = cards[idx]; diff = c["market_price"] - c["paid_price"]
+        nav = ([InlineKeyboardButton("⬅️", callback_data=f"binder_{flt}_{idx-1}")] if idx>0 else []) + [InlineKeyboardButton(f"{idx+1}/{len(cards)}", callback_data="x")] + ([InlineKeyboardButton("➡️", callback_data=f"binder_{flt}_{idx+1}")] if idx<len(cards)-1 else [])
+        kb = InlineKeyboardMarkup([f_kb, nav, [InlineKeyboardButton("🗑 Elimina", callback_data=f"del_{c['id']}"), InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+        await q.message.reply_photo(photo=c["photo_file_id"], caption=f"📖 *Carta {idx+1}/{len(cards)}* (Filtro: `{flt}`)\n🃏 *{c['name']}* (`{c['card_number']}`)\n📦 _{c['set_name']}_ | *{FLAGS.get(c['lang'],c['lang'])}* | *{c['grade']}*\n💵 Pagata: *{c['paid_price']:.2f} €* | 💎 Valore: *{c['market_price']:.2f} €* ({'+' if diff>=0 else ''}{diff:.2f} €)", parse_mode="Markdown", reply_markup=kb)
+    elif data.startswith("del_"): del_card(int(data.split("_")[1]), uid); await q.edit_message_caption("🗑 *Carta eliminata.*", parse_mode="Markdown", reply_markup=menu_kb())
+    elif data == "wish_view":
+        ws = get_wish(uid)
+        txt = "🎯 *LA TUA WISHLIST*\n\n" + ("\n".join([f"• *{w['name']}* — Target: *{w['target_price']:.2f} €*" for w in ws]) if ws else "Nessuna carta in Wishlist.")
+        rows = [[InlineKeyboardButton(f"❌ {w['name'][:22]}", callback_data=f"wdel_{w['id']}")] for w in ws[:5]]
+        rows.append([InlineKeyboardButton("➕ Aggiungi", callback_data="wish_add"), InlineKeyboardButton("🔍 Controlla Prezzi", callback_data="wish_check")])
+        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
+        await q.message.reply_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    elif data == "wish_add":
+        ctx.user_data["wait_wish"] = True
+        await q.message.reply_text("🎯 Scrivimi la carta e il tuo prezzo target separati da una virgola:\nEs: `Giratina V 186/196 ENG, 320`", parse_mode="Markdown")
+    elif data.startswith("wdel_"): del_wish(int(data.split("_")[1]), uid); await q.edit_message_text("🗑 *Rimossa dalla Wishlist.*", parse_mode="Markdown", reply_markup=menu_kb())
+    elif data == "wish_check":
+        ws = get_wish(uid)
+        if not ws: return await q.message.reply_text("🎯 Wishlist vuota!", reply_markup=menu_kb())
+        w = await q.message.reply_text("🔍 *Controllo i prezzi live della Wishlist...*", parse_mode="Markdown")
+        lst = "\n".join([f"- {x['name']} (Target: {x['target_price']} EUR)" for x in ws])
+        try:
+            rep = await asyncio.wait_for(asyncio.to_thread(ask_gemini, f"Cerca su Cardmarket/PriceCharting il prezzo attuale in EUR di queste carte Pokemon e confrontalo col Target. Rispondi in italiano in modo breve con emoji (🟢 se sotto/vicino al target, 🔴 se ancora alto), senza asterischi:\n{lst}", True), timeout=35)
+            await w.edit_text(f"🎯 *CONTROLLO WISHLIST LIVE*\n\n{rep}", parse_mode="Markdown", reply_markup=menu_kb())
+        except Exception as e: await w.edit_text(f"⚠️ Errore: {e}", reply_markup=menu_kb())
+    elif data == "radar":
+        w = await q.message.reply_text("📡 *Scansiono Cardmarket e i trend predittivi live...*", parse_mode="Markdown")
+        p = 'Cerca sul web i trend reali attuali del mercato Pokemon TCG (Cardmarket/PriceCharting/TCGPlayer). Scegli 4 carte (escludi carte museo come Pikachu Illustrator): 2 carte IN RIALZO ORA e 2 carte SLEEPER che potrebbero salire a breve (out of print, illustratori ricercati, AR/SAR sottovalutate). Rispondi SOLO con un array JSON valido di 4 oggetti: [{"tag":"📈 IN RIALZO","name":"Nome inglese carta","num":"215/203","set":"Nome Set","price":"120 €","reason":"Motivo breve in italiano"}]'
+        try:
+            txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=35)
+            items = parse_json(txt, is_list=True)[:4]
+            media = [InputMediaPhoto(media=fetch_img(i["name"], i["num"]), caption=f"{i['tag']} {i['name']} ({i['num']}) — {i['price']}") for i in items]
+            try: await q.message.reply_media_group(media=media)
+            except Exception: pass
+            rep = "🔥 *RADAR MERCATO & PREVISIONI LIVE*\n\n" + "\n\n".join([f"{i['tag']}\n🃏 *{i['name']}* (`{i['num']}`) — _{i['set']}_\n💶 *{i['price']}*\n💡 {i['reason']}" for i in items])
+            await w.edit_text(rep, parse_mode="Markdown", reply_markup=menu_kb())
+        except Exception as e: await w.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=menu_kb())
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -164,6 +149,7 @@ def main():
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
     app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_doc))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_btn))
