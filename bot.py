@@ -2,6 +2,9 @@ import os
 import json
 import sqlite3
 import logging
+import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
@@ -17,7 +20,6 @@ from telegram.ext import (
     filters,
 )
 
-# Configurazione log e chiavi
 logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -33,7 +35,6 @@ FLAGS = {
 }
 
 
-# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -99,13 +100,11 @@ def delete_card_db(card_id, user_id):
     conn.close()
 
 
-# --- GRAFICA DASHBOARD PORTAFOGLIO ---
 def generate_portfolio_card(cards):
     W, H = 900, 560
     img = Image.new("RGB", (W, H), color=(18, 20, 28))
     draw = ImageDraw.Draw(img)
 
-    # Bordo dorato e riquadri interni
     draw.rounded_rectangle([20, 20, W - 20, H - 20], radius=24, outline=(212, 175, 55), width=3)
     draw.rounded_rectangle([45, 110, 435, 280], radius=16, fill=(28, 32, 44))
     draw.rounded_rectangle([465, 110, 855, 280], radius=16, fill=(28, 32, 44))
@@ -123,21 +122,17 @@ def generate_portfolio_card(cards):
     pnl_color = (72, 219, 132) if pnl >= 0 else (255, 95, 95)
     sign = "+" if pnl >= 0 else ""
 
-    # Intestazione
     draw.text((48, 45), "POKEBINDER PRO  |  PORTAFOGLIO", fill=(212, 175, 55), font=font_title)
     draw.text((710, 54), f"{len(cards)} Carte", fill=(170, 175, 190), font=font_sub)
 
-    # Box 1: Valore Totale
     draw.text((70, 132), "VALORE ATTUALE", fill=(160, 168, 185), font=font_sub)
     draw.text((70, 170), f"EUR {total_val:,.2f}", fill=(255, 255, 255), font=font_big)
     draw.text((70, 230), f"Investito: EUR {total_paid:,.2f}", fill=(140, 148, 165), font=font_sub)
 
-    # Box 2: Profitto / Perdita
     draw.text((490, 132), "RENDIMENTO (P&L)", fill=(160, 168, 185), font=font_sub)
     draw.text((490, 170), f"{sign}EUR {pnl:,.2f}", fill=pnl_color, font=font_big)
     draw.text((490, 230), f"{sign}{pnl_pct:.1f}% sul capitale", fill=pnl_color, font=font_sub)
 
-    # Box 3: Top 3 Carte & Lingue
     draw.text((70, 322), "TOP CARTE IN COLLEZIONE", fill=(212, 175, 55), font=font_sub)
     top3 = cards[:3]
     y_pos = 360
@@ -156,7 +151,6 @@ def generate_portfolio_card(cards):
     return bio
 
 
-# --- MENU E TASTI ---
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -183,7 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
-# --- ANALISI FOTO CON GEMINI ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wait_msg = await update.message.reply_text("🔍 *Analizzo la carta e cerco le quotazioni...*", parse_mode="Markdown")
     photo = update.message.photo[-1]
@@ -259,7 +252,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📸 Mandami una foto di una carta per aggiungerla, oppure usa il menu:", reply_markup=main_menu_keyboard())
 
 
-# --- NAVIGAZIONE E PULSANTI ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -360,22 +352,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait.edit_text(res.text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"PokeBinder is running!")
 
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
+
 def main():
     init_db()
     threading.Thread(target=run_dummy_server, daemon=True).start()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
