@@ -143,3 +143,18 @@ async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await w.edit_text(r.text, reply_markup=menu_kb())
         except Exception as e: await w.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=menu_kb())
 
+class H(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+
+def main():
+    init_db()
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), H).serve_forever(), daemon=True).start()
+    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+    app = Application.builder().token(os.environ.get("TELEGRAM_TOKEN")).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CallbackQueryHandler(on_btn))
+    app.run_polling()
+
+if __name__ == "__main__": main()
