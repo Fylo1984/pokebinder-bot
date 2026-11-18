@@ -23,42 +23,76 @@ def ask_gemini(contents, search=True):
     raise RuntimeError("Server AI momentaneamente occupati. Riprova tra 10 secondi.")
 
 def parse_json(txt, is_list=False):
-    a, b = ("[", "]") if is_list else ("{", "}")
-    return json.loads(txt[txt.find(a):txt.rfind(b) + 1])
+    try:
+        clean = txt.strip()
+        if "```json" in clean:
+            clean = clean.split("```json")[1].split("```")[0].strip()
+        elif "```" in clean:
+            clean = clean.split("```")[1].split("```")[0].strip()
+        a, b = ("[", "]") if is_list else ("{", "}")
+        start, end = clean.find(a), clean.rfind(b)
+        if start != -1 and end != -1:
+            clean = clean[start:end + 1]
+        return json.loads(clean)
+    except Exception as e:
+        raise ValueError(f"Errore parsing JSON: {e} | Testo ricevuto: {txt[:100]}")
 
 def cm_search(name, num=""):
     try:
         n = num.split("/")[0].lstrip("0") if num else ""
         q = f'name:"{name.split()[0]}"' + (f' number:{n}' if n else "")
-        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": q, "pageSize": 5}, timeout=8).json()
-        for c in r.get("data", []):
-            p = c.get("cardmarket", {}).get("prices", {})
-            val = p.get("trendPrice") or p.get("averageSellPrice") or p.get("avg7")
-            if val:
-                return {"price": float(val), "img": c.get("images", {}).get("large", "")}
+        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": q, "pageSize": 5}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=8)
+        if r.status_code == 200 and r.text.strip().startswith("{"):
+            for c in r.json().get("data", []):
+                p = c.get("cardmarket", {}).get("prices", {})
+                val = p.get("trendPrice") or p.get("averageSellPrice") or p.get("avg7")
+                if val:
+                    return {"price": float(val), "img": c.get("images", {}).get("large", "")}
     except Exception: pass
     return None
 
 def radar_live():
-    r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": 'rarity:"Special Illustration Rare" OR rarity:"Illustration Rare"', "pageSize": 35, "orderBy": "-set.releaseDate"}, timeout=10).json()
     pool = []
-    for c in r.get("data", []):
-        p = c.get("cardmarket", {}).get("prices", {})
-        t, a30 = p.get("trendPrice") or p.get("avg7") or 0, p.get("avg30") or 0
-        if t >= 12 and a30 >= 8:
-            delta = ((t - a30) / a30) * 100
-            num = f"{c.get('number','')}/{c.get('set',{}).get('printedTotal','')}"
-            pool.append({"name": c["name"], "num": num, "set": c.get("set",{}).get("name",""), "price": t, "a30": a30, "delta": delta, "img": c.get("images",{}).get("large","")})
-    pool.sort(key=lambda x: x["delta"], reverse=True)
-    rising = pool[:2]
-    sleepers = [x for x in pool[2:] if 12 <= x["price"] <= 75][:2] or pool[2:4]
-    picks = [dict(x, tag="📈 IN RIALZO") for x in rising] + [dict(x, tag="🔮 SLEEPER") for x in sleepers]
     try:
-        summary = "\n".join([f"{i}: {x['name']} ({x['num']}, {x['set']}) Trend {x['price']:.2f}€ vs 30gg {x['a30']:.2f}€ ({x['delta']:+.1f}%)" for i, x in enumerate(picks)])
-        notes = parse_json(ask_gemini(f'Per ciascuna di queste 4 carte Pokemon con dati reali Cardmarket, scrivi una frase brevissima in italiano (max 15 parole) sul perche sta salendo o potrebbe salire a breve:\n{summary}\nRispondi SOLO con JSON: {{"0":"...","1":"...","2":"...","3":"..."}}', search=False))
-        for i, x in enumerate(picks): x["reason"] = notes.get(str(i), f"Momentum Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg.")
-    except Exception:
-        for x in picks: x["reason"] = f"Trend Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg ({x['a30']:.2f} €)."
+        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": 'rarity:"Special Illustration Rare" OR rarity:"Illustration Rare"', "pageSize": 30}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=8)
+        if r.status_code == 200 and r.text.strip().startswith("{"):
+            for c in r.json().get("data", []):
+                p = c.get("cardmarket", {}).get("prices", {})
+                t, a30 = p.get("trendPrice") or p.get("avg7") or 0, p.get("avg30") or 0
+                if t >= 10 and a30 >= 5:
+                    delta = ((t - a30) / a30) * c.get('printedTotal', 100) / c.get('printedTotal', 100) * 100 if a30 > 0 else 0
+                    delta = ((t - a30) / a30) * 100
+                    num = f"{c.get('number','')}/{c.get('set',{}).get('printedTotal','')}"
+                    pool.append({"name": c["name"], "num": num, "set": c.get("set",{}).get("name",""), "price": t, "a30": a30, "delta": delta, "img": c.get("images",{}).get("large","")})
+    except Exception: pass
+    
+    if len(pool) >= 4:
+        pool.sort(key=lambda x: x["delta"], reverse=True)
+        rising = pool[:2]
+        sleepers = [x for x in pool[2:] if 10 <= x["price"] <= 80][:2] or pool[2:4]
+        picks = [dict(x, tag="📈 IN RIALZO") for x in rising] + [dict(x, tag="🔮 SLEEPER") for x in sleepers]
+        try:
+            summary = "\n".join([f"- {x['name']} ({x['num']}, {x['set']}): Trend {x['price']:.2f}€ vs 30gg {x['a30']:.2f}€ ({x['delta']:+.1f}%)" for x in picks])
+            prompt = f'Scrivi una motivazione brevissima in italiano (massimo 12 parole) per ciascuna di queste 4 carte Pokemon basandoti sui dati Cardmarket:\n{summary}\nRispondi SOLO con un oggetto JSON in cui le chiavi sono i numeri da 0 a 3, es: {{"0":"...","1":"...","2":"...","3":"..."}}'
+            notes = parse_json(ask_gemini(prompt, search=False))
+            for i, x in enumerate(picks): x["reason"] = notes.get(str(i), f"Trend Cardmarket {x['delta']:+.1f}% rispetto alla media.")
+        except Exception:
+            for x in picks: x["reason"] = f"Trend Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg."
+        return picks
+
+    # Fallback con ricerca live web strutturata
+    fallback_prompt = (
+        'Cerca sul web i trend attuali reali del mercato Pokemon TCG (Cardmarket/TCGPlayer). '
+        'Seleziona 4 carte (2 IN RIALZO ORA e 2 SLEEPER con potenziale di crescita imminente, escludi carte storiche museo). '
+        'Rispondi SOLO con un array JSON valido di 4 oggetti con questa esatta struttura: '
+        '[{"tag":"📈 IN RIALZO","name":"Nome inglese esatto","num":"215/203","set":"Nome Set","price":125.0,"delta":14.5,"reason":"Motivo breve in italiano"}]'
+    )
+    txt = ask_gemini(fallback_prompt, search=True)
+    picks = parse_json(txt, is_list=True)[:4]
+    for x in picks:
+        x["price"] = float(str(x.get("price", 0)).replace("€","").replace(",",".").strip() or 0)
+        x["delta"] = float(str(x.get("delta", 0)).replace("%","").replace("+","").strip() or 0)
+        x["img"] = fetch_img(x["name"], x.get("num", ""))
     return picks
 
 def init_db():
