@@ -22,7 +22,7 @@ async def start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def confirm_card(msg, ctx, d, pref):
     ctx.user_data.update({"card": d, "photo": pref, "wait_price": True, "wait_wish": False})
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Salva (0 €)", callback_data="save0"), InlineKeyboardButton("❌ Annulla", callback_data="cancel")]])
-    await msg.edit_text(f"✨ *{d['name']}* (`{d['card_number']}`)\n📦 _{d['set_name']}_\n🌍 *{FLAGS.get(d['lang'].upper(), d['lang'])}* | 🏷 *{d['grade']}*\n💶 Valore live: *{float(d['market_price']):.2f} €*\n\n💰 *Quanto l'hai pagata in Euro?* (scrivi solo il numero)", parse_mode="Markdown", reply_markup=kb)
+    await msg.edit_text(f"✨ *{d['name']}* (`{d['card_number']}`)\n📦 _{d['set_name']}_\n🌍 *{FLAGS.get(d['lang'].upper(), d['lang'])}* | 🏷 *{d['grade']}*\n💶 Valore Cardmarket/Live: *{float(d['market_price']):.2f} €*\n\n💰 *Quanto l'hai pagata in Euro?* (scrivi solo il numero)", parse_mode="Markdown", reply_markup=kb)
 
 async def on_doc(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     doc = u.message.document
@@ -30,16 +30,20 @@ async def on_doc(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     f = await ctx.bot.get_file(doc.file_id)
     await f.download_to_drive(DB)
     init_db()
-    await u.message.reply_text("✅ *Backup ripristinato con successo!* Tutte le tue carte e la Wishlist sono tornate online.", parse_mode="Markdown", reply_markup=menu_kb())
+    await u.message.reply_text("✅ *Backup ripristinato!* Tutte le tue carte e la Wishlist sono tornate online.", parse_mode="Markdown", reply_markup=menu_kb())
 
 async def on_photo(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    w = await u.message.reply_text("🔍 *Analizzo la carta e cerco il prezzo live...*", parse_mode="Markdown")
+    w = await u.message.reply_text("🔍 *Analizzo la carta e cerco il prezzo...*", parse_mode="Markdown")
     f = await ctx.bot.get_file(u.message.photo[-1].file_id)
     b = await f.download_as_bytearray()
-    p = 'Identifica questa carta Pokemon (Raw o gradata) e cerca il prezzo attuale su Cardmarket/eBay in EUR. Rispondi SOLO con JSON: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}'
+    p = 'Identifica questa carta Pokemon (Raw o gradata) e stima il prezzo attuale in EUR. Rispondi SOLO con JSON: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}'
     try:
         txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, [types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p], True), timeout=30)
-        await confirm_card(w, ctx, parse_json(txt), u.message.photo[-1].file_id)
+        d = parse_json(txt)
+        if d.get("lang","").upper() not in ("JAP","KOR") and d.get("grade","Raw").lower() == "raw":
+            cm = await asyncio.to_thread(cm_search, d["name"], d["card_number"])
+            if cm: d["market_price"] = cm["price"]
+        await confirm_card(w, ctx, d, u.message.photo[-1].file_id)
     except Exception as e: await w.edit_text(f"⚠️ Riprova tra qualche secondo. ({e})")
 
 async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -62,12 +66,16 @@ async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await u.message.reply_text(f"🎉 *{d['name']}* salvata nel Binder!", parse_mode="Markdown", reply_markup=menu_kb())
         except ValueError: await u.message.reply_text("✍️ Scrivi solo il numero in Euro (es. `25`), oppure premi Annulla.")
         return
-    w = await u.message.reply_text(f"🔎 *Cerco* `{t}` *e prezzo live...*", parse_mode="Markdown")
-    p = f'Identifica la carta Pokemon "{t}" e cerca il suo prezzo attuale su Cardmarket/PriceCharting in EUR. Rispondi SOLO con JSON: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
+    w = await u.message.reply_text(f"🔎 *Cerco* `{t}` *su Cardmarket...*", parse_mode="Markdown")
+    p = f'Identifica la carta Pokemon "{t}" e stima il prezzo attuale in EUR. Rispondi SOLO con JSON: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
     try:
         txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=30)
         d = parse_json(txt)
-        await confirm_card(w, ctx, d, fetch_img(d["name"], d["card_number"]))
+        cm = await asyncio.to_thread(cm_search, d["name"], d["card_number"])
+        if cm and d.get("lang","").upper() not in ("JAP","KOR") and d.get("grade","Raw").lower() == "raw":
+            d["market_price"] = cm["price"]
+        img = (cm["img"] if cm and cm["img"] else await asyncio.to_thread(fetch_img, d["name"], d["card_number"]))
+        await confirm_card(w, ctx, d, img)
     except Exception as e: await w.edit_text(f"⚠️ Riprova tra qualche secondo ({e}). Es: `Magikarp 080/073 JAP`.")
 
 async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -90,13 +98,13 @@ async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "sync_prices":
         cards = get_cards(uid)
         if not cards: return await q.message.reply_text("📭 Binder vuoto!", reply_markup=menu_kb())
-        w = await q.message.reply_text(f"🔄 *Aggiorno le quotazioni live di {len(cards)} carte...*", parse_mode="Markdown")
+        w = await q.message.reply_text(f"🔄 *Aggiorno le quotazioni di {len(cards)} carte...*", parse_mode="Markdown")
         lst = "\n".join([f'{c["id"]}: {c["name"]} {c["card_number"]} {c["lang"]} ({c["grade"]})' for c in cards[:25]])
-        p = f'Cerca il prezzo attuale in EUR su Cardmarket/PriceCharting per queste carte Pokemon:\n{lst}\nRispondi SOLO con un oggetto JSON dove le chiavi sono gli ID e i valori i prezzi numerici, es: {{"1": 45.5, "2": 120.0}}'
+        p = f'Stima il prezzo attuale in EUR su Cardmarket/PriceCharting per queste carte Pokemon:\n{lst}\nRispondi SOLO con JSON ID:prezzo, es: {{"1": 45.5, "2": 120.0}}'
         try:
             res = parse_json(await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=35))
             for k, v in res.items(): update_price(int(k), uid, v)
-            await w.edit_text("✅ *Quotazioni aggiornate con successo!* Apri il Portafoglio per vedere il nuovo P&L.", parse_mode="Markdown", reply_markup=menu_kb())
+            await w.edit_text("✅ *Quotazioni aggiornate!* Apri il Portafoglio per vedere il nuovo P&L.", parse_mode="Markdown", reply_markup=menu_kb())
         except Exception as e: await w.edit_text(f"⚠️ Errore aggiornamento: {e}", reply_markup=menu_kb())
     elif data.startswith("binder_"):
         _, flt, idx_s = data.split("_"); cards = get_cards(uid, flt)
@@ -124,19 +132,17 @@ async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
         w = await q.message.reply_text("🔍 *Controllo i prezzi live della Wishlist...*", parse_mode="Markdown")
         lst = "\n".join([f"- {x['name']} (Target: {x['target_price']} EUR)" for x in ws])
         try:
-            rep = await asyncio.wait_for(asyncio.to_thread(ask_gemini, f"Cerca su Cardmarket/PriceCharting il prezzo attuale in EUR di queste carte Pokemon e confrontalo col Target. Rispondi in italiano in modo breve con emoji (🟢 se sotto/vicino al target, 🔴 se ancora alto), senza asterischi:\n{lst}", True), timeout=35)
-            await w.edit_text(f"🎯 *CONTROLLO WISHLIST LIVE*\n\n{rep}", parse_mode="Markdown", reply_markup=menu_kb())
+            rep = await asyncio.wait_for(asyncio.to_thread(ask_gemini, f"Confronta il prezzo attuale in EUR su Cardmarket/PriceCharting di queste carte Pokemon col Target. Rispondi in italiano breve con emoji (🟢 vicino/sotto target, 🔴 alto), senza asterischi:\n{lst}", True), timeout=35)
+            await w.edit_text(f"🎯 *CONTROLLO WISHLIST*\n\n{rep}", parse_mode="Markdown", reply_markup=menu_kb())
         except Exception as e: await w.edit_text(f"⚠️ Errore: {e}", reply_markup=menu_kb())
     elif data == "radar":
-        w = await q.message.reply_text("📡 *Scansiono Cardmarket e i trend predittivi live...*", parse_mode="Markdown")
-        p = 'Cerca sul web i trend reali attuali del mercato Pokemon TCG (Cardmarket/PriceCharting/TCGPlayer). Scegli 4 carte (escludi carte museo come Pikachu Illustrator): 2 carte IN RIALZO ORA e 2 carte SLEEPER che potrebbero salire a breve (out of print, illustratori ricercati, AR/SAR sottovalutate). Rispondi SOLO con un array JSON valido di 4 oggetti: [{"tag":"📈 IN RIALZO","name":"Nome inglese carta","num":"215/203","set":"Nome Set","price":"120 €","reason":"Motivo breve in italiano"}]'
+        w = await q.message.reply_text("📡 *Analizzo i dati reali Cardmarket...*", parse_mode="Markdown")
         try:
-            txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p, True), timeout=35)
-            items = parse_json(txt, is_list=True)[:4]
-            media = [InputMediaPhoto(media=fetch_img(i["name"], i["num"]), caption=f"{i['tag']} {i['name']} ({i['num']}) — {i['price']}") for i in items]
+            items = await asyncio.wait_for(asyncio.to_thread(radar_live), timeout=30)
+            media = [InputMediaPhoto(media=i["img"], caption=f"{i['tag']} {i['name']} ({i['num']}) — {i['price']:.2f} € ({i['delta']:+.1f}%)") for i in items if i["img"]]
             try: await q.message.reply_media_group(media=media)
             except Exception: pass
-            rep = "🔥 *RADAR MERCATO & PREVISIONI LIVE*\n\n" + "\n\n".join([f"{i['tag']}\n🃏 *{i['name']}* (`{i['num']}`) — _{i['set']}_\n💶 *{i['price']}*\n💡 {i['reason']}" for i in items])
+            rep = "🔥 *RADAR CARDMARKET & PREVISIONI*\n\n" + "\n\n".join([f"{i['tag']}\n🃏 *{i['name']}* (`{i['num']}`) — _{i['set']}_\n💶 *{i['price']:.2f} €* (vs 30gg: *{i['delta']:+.1f}%*)\n💡 {i['reason']}" for i in items])
             await w.edit_text(rep, parse_mode="Markdown", reply_markup=menu_kb())
         except Exception as e: await w.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=menu_kb())
 
