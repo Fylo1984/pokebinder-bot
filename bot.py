@@ -40,21 +40,12 @@ FLAGS = {
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS cards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            name TEXT,
-            set_name TEXT,
-            card_number TEXT,
-            lang TEXT,
-            grade TEXT,
-            paid_price REAL,
-            market_price REAL,
-            photo_file_id TEXT,
-            added_at TEXT
-        )
-    """)
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS cards ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, "
+        "set_name TEXT, card_number TEXT, lang TEXT, grade TEXT, "
+        "paid_price REAL, market_price REAL, photo_file_id TEXT, added_at TEXT)"
+    )
     conn.commit()
     conn.close()
 
@@ -63,10 +54,8 @@ def add_card_db(user_id, data, paid_price, photo_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
-        """
-        INSERT INTO cards (user_id, name, set_name, card_number, lang, grade, paid_price, market_price, photo_file_id, added_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
+        "INSERT INTO cards (user_id, name, set_name, card_number, lang, grade, paid_price, market_price, photo_file_id, added_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id,
             data.get("name", "Sconosciuta"),
@@ -226,18 +215,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
     img_bytes = await file.download_as_bytearray()
 
-    prompt = """
-    Analizza questa immagine di una carta Pokémon (Raw, in toploader o gradata PSA/CGC/BGS/GRAAD).
-    Identifica:
-    1. Nome della carta (es. "Umbreon VMAX Alt Art" o "Magikarp AR")
-    2. Nome del set (es. "Evolving Skies" o "Triplet Beat")
-    3. Numero carta (es. "215/203" o "080/073")
-    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR
-    5. Condizione/Grado (es. "Raw", "PSA 10", "BGS 9.5", "GRAAD 9")
-    6. Stima realistica del prezzo attuale in EUR (numero decimale, es. 45.50).
-    Rispondi SOLO con JSON valido senza markdown:
-    {"name": "...", "set_name": "...", "card_number": "...", "lang": "JAP", "grade": "Raw", "market_price": 45.50}
-    """
+    prompt = (
+        "Analizza questa immagine di una carta Pokemon (Raw, in toploader o gradata PSA/CGC/BGS/GRAAD). "
+        "Identifica: 1) Nome della carta, 2) Nome del set, 3) Numero carta (es. 215/203), "
+        "4) Lingua scegliendo SOLO tra ITA, JAP, ENG, KOR, 5) Grado (es. Raw, PSA 10, GRAAD 9), "
+        "6) Stima realistica del prezzo attuale in EUR (numero decimale). "
+        'Rispondi SOLO con JSON valido senza markdown: {"name": "...", "set_name": "...", "card_number": "...", "lang": "JAP", "grade": "Raw", "market_price": 45.50}'
+    )
 
     try:
         response = client.models.generate_content(
@@ -261,27 +245,4 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_num = txt.replace(",", ".").replace("€", "").strip()
         try:
             paid = float(clean_num)
-            card_data = context.user_data.pop("pending_card")
-            photo_id = context.user_data.pop("pending_photo")
-            context.user_data["awaiting_price"] = False
-            add_card_db(update.effective_user.id, card_data, paid, photo_id)
-            await update.message.reply_text(
-                f"🎉 *{card_data['name']}* aggiunta al tuo Binder!\nPagata: *{paid:.2f} €* | Valore: *{float(card_data['market_price']):.2f} €*",
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-        except ValueError:
-            await update.message.reply_text("✍️ Scrivi solo un numero per il prezzo pagato (es. `30` oppure `12.50`), oppure tocca *Annulla*.", parse_mode="Markdown")
-            return
-
-    wait_msg = await update.message.reply_text(f"🔎 *Cerco* `{txt}` *nei cataloghi...*", parse_mode="Markdown")
-    search_prompt = f"""
-    L'utente vuole aggiungere al suo raccoglitore Pokémon questa carta scritta a mano: "{txt}".
-    Identifica con precisione la carta Pokémon corrispondente e restituisci:
-    1. Nome completo della carta (es. "Magikarp AR" o "Giratina V Alt Art")
-    2. Nome del set ufficiale
-    3. Numero carta (es. "080/073")
-    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR (se non specificata, deducila dal numero/set o usa ENG)
-    5. Grado/Condizione (es. "Raw" se non specificato, oppure "PSA 10", "GRAAD 9", ecc.)
-    6. Stima realistica del prezzo di mercato attuale in EUR (numero decimale) per quella specifica lingua e grado
+            card_data = context
