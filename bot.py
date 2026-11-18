@@ -4,6 +4,7 @@ import sqlite3
 import logging
 import asyncio
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from datetime import datetime
@@ -100,6 +101,24 @@ def delete_card_db(card_id, user_id):
     conn.close()
 
 
+def fetch_official_image_url(name, card_number):
+    try:
+        clean_name = name.split()[0]
+        r = requests.get(f"https://api.tcgdex.net/v2/en/cards?name={clean_name}", timeout=5)
+        if r.status_code == 200:
+            items = r.json()
+            num_part = card_number.split("/")[0].lstrip("0")
+            for item in items:
+                if item.get("image") and (not num_part or item.get("localId", "").lstrip("0") == num_part):
+                    return f"{item['image']}/high.webp"
+            for item in items:
+                if item.get("image"):
+                    return f"{item['image']}/high.webp"
+    except Exception:
+        pass
+    return "https://images.pokemontcg.io/base1/4_hires.png"
+
+
 def generate_portfolio_card(cards):
     W, H = 900, 560
     img = Image.new("RGB", (W, H), color=(18, 20, 28))
@@ -137,7 +156,7 @@ def generate_portfolio_card(cards):
     top3 = cards[:3]
     y_pos = 360
     if not top3:
-        draw.text((70, y_pos), "Nessuna carta ancora. Inviami una foto per iniziare!", fill=(180, 180, 190), font=font_med)
+        draw.text((70, y_pos), "Nessuna carta ancora. Inviami una foto o il numero!", fill=(180, 180, 190), font=font_med)
     else:
         for i, c in enumerate(top3, 1):
             label = f"{i}. {c['name']} [{c['lang']}] ({c['grade']})  —  EUR {c['market_price']:.2f}"
@@ -159,7 +178,7 @@ def main_menu_keyboard():
         ],
         [
             InlineKeyboardButton("🔥 Radar Mercato", callback_data="market_radar"),
-            InlineKeyboardButton("📸 Come aggiungere", callback_data="help_add"),
+            InlineKeyboardButton("➕ Come aggiungere", callback_data="help_add"),
         ],
     ])
 
@@ -168,32 +187,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init_db()
     text = (
         "✨ *Benvenuto nel tuo PokeBinder Pro!*\n\n"
-        "Gestisci la tua collezione *ITA, JAP, ENG e KOR* con un tocco:\n"
-        "• 📸 *Mandami la foto di una carta* (anche in toploader o gradata) e la riconosco subito.\n"
-        "• 📖 *Sfoglia il Binder* con foto, valori e guadagni.\n"
-        "• 📊 *Statistiche Portafoglio* con card grafica.\n"
-        "• 🔥 *Radar Mercato* con le carte più calde e rivalutate."
+        "Aggiungi carte *ITA, JAP, ENG e KOR* in due modi:\n"
+        "• 📸 *Mandami una foto* della carta (raw, toploader o gradata).\n"
+        "• ✍️ *Scrivimi nome e numero* (es. `Magikarp 080/073 JAP` oppure `Charizard 199/165 ITA PSA 10`).\n"
+        "• 📖 *Sfoglia il Binder* e controlla il *Portafoglio*!"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 
+async def send_card_confirmation(target_msg, context, card_data, photo_ref):
+    context.user_data["pending_card"] = card_data
+    context.user_data["pending_photo"] = photo_ref
+    context.user_data["awaiting_price"] = True
+
+    flag = FLAGS.get(card_data.get("lang", "ENG").upper(), "🌐")
+    msg = (
+        f"✨ *Carta identificata!*\n\n"
+        f"🃏 *{card_data['name']}* (`{card_data['card_number']}`)\n"
+        f"📦 Set: _{card_data['set_name']}_\n"
+        f"🌍 Lingua: *{flag}*  |  🏷 Stato: *{card_data['grade']}*\n"
+        f"💶 Valore stimato: *{float(card_data['market_price']):.2f} €*\n\n"
+        f"💰 *Quanto l'hai pagata in Euro?*\n"
+        f"_(Scrivimi solo il numero in chat, es. `25`, oppure tocca il tasto qui sotto)_"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Salva (Pagata 0 €)", callback_data="save_free"),
+            InlineKeyboardButton("❌ Annulla", callback_data="cancel_add"),
+        ]
+    ])
+    await target_msg.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    wait_msg = await update.message.reply_text("🔍 *Analizzo la carta e cerco le quotazioni...*", parse_mode="Markdown")
+    wait_msg = await update.message.reply_text("🔍 *Analizzo la foto e cerco le quotazioni...*", parse_mode="Markdown")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     img_bytes = await file.download_as_bytearray()
 
     prompt = """
-    Analizza questa immagine di una carta Pokémon (può essere Raw, in toploader o gradata PSA/CGC/BGS/GRAAD).
-    Identifica con precisione:
+    Analizza questa immagine di una carta Pokémon (Raw, in toploader o gradata PSA/CGC/BGS/GRAAD).
+    Identifica:
     1. Nome della carta (es. "Umbreon VMAX Alt Art" o "Magikarp AR")
-    2. Nome del set e codice (es. "Evolving Skies" o "Triplet Beat")
+    2. Nome del set (es. "Evolving Skies" o "Triplet Beat")
     3. Numero carta (es. "215/203" o "080/073")
-    4. Lingua esatta scegliendo SOLO tra: ITA, JAP, ENG, KOR
-    5. Condizione/Grado (es. "Raw" oppure "PSA 10", "BGS 9.5", "GRAAD 9", ecc.)
-    6. Stima realistica del prezzo attuale di mercato in EUR (numero decimale, es. 45.50) basata su Cardmarket/eBay per quella specifica lingua e grado.
-
-    Rispondi SOLO con un JSON valido in questo formato esatto, senza markdown:
+    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR
+    5. Condizione/Grado (es. "Raw", "PSA 10", "BGS 9.5", "GRAAD 9")
+    6. Stima realistica del prezzo attuale in EUR (numero decimale, es. 45.50).
+    Rispondi SOLO con JSON valido senza markdown:
     {"name": "...", "set_name": "...", "card_number": "...", "lang": "JAP", "grade": "Raw", "market_price": 45.50}
     """
 
@@ -207,36 +248,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         raw_json = response.text.strip().replace("```json", "").replace("```", "").strip()
         card_data = json.loads(raw_json)
-        context.user_data["pending_card"] = card_data
-        context.user_data["pending_photo"] = photo.file_id
-        context.user_data["awaiting_price"] = True
-
-        flag = FLAGS.get(card_data.get("lang", "ENG").upper(), "🌐")
-        msg = (
-            f"✨ *Carta riconosciuta!*\n\n"
-            f"🃏 *{card_data['name']}* (`{card_data['card_number']}`)\n"
-            f"📦 Set: _{card_data['set_name']}_\n"
-            f"🌍 Lingua: *{flag}*  |  🏷 Stato: *{card_data['grade']}*\n"
-            f"💶 Valore stimato: *{float(card_data['market_price']):.2f} €*\n\n"
-            f"💰 *Quanto l'hai pagata in Euro?*\n"
-            f"_(Scrivimi solo il numero in chat, es. `25`, oppure tocca il tasto qui sotto)_"
-        )
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Salva (Pagata 0 €)", callback_data="save_free"),
-                InlineKeyboardButton("❌ Annulla", callback_data="cancel_add"),
-            ]
-        ])
-        await wait_msg.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
+        await send_card_confirmation(wait_msg, context, card_data, photo.file_id)
     except Exception as e:
-        await wait_msg.edit_text(f"⚠️ Non sono riuscito a leggere bene la carta, riprova con una foto più nitida.\n({e})")
+        await wait_msg.edit_text(f"⚠️ Errore nella lettura: {e}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text.strip()
+
     if context.user_data.get("awaiting_price"):
-        txt = update.message.text.replace(",", ".").replace("€", "").strip()
+        clean_num = txt.replace(",", ".").replace("€", "").strip()
         try:
-            paid = float(txt)
+            paid = float(clean_num)
             card_data = context.user_data.pop("pending_card")
             photo_id = context.user_data.pop("pending_photo")
             context.user_data["awaiting_price"] = False
@@ -246,10 +269,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=main_menu_keyboard(),
             )
+            return
         except ValueError:
-            await update.message.reply_text("✍️ Scrivi un numero valido per il prezzo pagato (es. `30` oppure `12.50`).", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("📸 Mandami una foto di una carta per aggiungerla, oppure usa il menu:", reply_markup=main_menu_keyboard())
+            await update.message.reply_text("✍️ Scrivi solo un numero per il prezzo pagato (es. `30` oppure `12.50`), oppure tocca *Annulla*.", parse_mode="Markdown")
+            return
+
+    wait_msg = await update.message.reply_text(f"🔎 *Cerco* `{txt}` *nei cataloghi...*", parse_mode="Markdown")
+    search_prompt = f"""
+    L'utente vuole aggiungere al suo raccoglitore Pokémon questa carta scritta a mano: "{txt}".
+    Identifica con precisione la carta Pokémon corrispondente e restituisci:
+    1. Nome completo della carta (es. "Magikarp AR" o "Giratina V Alt Art")
+    2. Nome del set ufficiale
+    3. Numero carta (es. "080/073")
+    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR (se non specificata, deducila dal numero/set o usa ENG)
+    5. Grado/Condizione (es. "Raw" se non specificato, oppure "PSA 10", "GRAAD 9", ecc.)
+    6. Stima realistica del prezzo di mercato attuale in EUR (numero decimale) per quella specifica lingua e grado.
+    Rispondi SOLO con JSON valido senza markdown:
+    {{"name": "...", "set_name": "...", "card_number": "...", "lang": "JAP", "grade": "Raw", "market_price": 45.50}}
+    """
+    try:
+        response = client.models.generate_content(model="gemini-2.5-flash", contents=search_prompt)
+        raw_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+        card_data = json.loads(raw_json)
+        img_url = fetch_official_image_url(card_data["name"], card_data["card_number"])
+        await send_card_confirmation(wait_msg, context, card_data, img_url)
+    except Exception as e:
+        await wait_msg.edit_text(
+            f"⚠️ Non ho trovato la carta ({e}). Prova a scrivere nome e numero più precisi (es. `Umbreon VMAX 215/203 ENG`)!",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,9 +311,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "help_add":
         await query.message.reply_text(
-            "📸 *Aggiunta Rapida con Foto*\n\n"
-            "Scatta o carica una foto della carta (anche dentro raccoglitore, toploader o slab gradata).\n"
-            "Riconosco in automatico nome, set, lingua (*ITA, JAP, ENG, KOR*), grado e quotazione!",
+            "➕ *Come aggiungere una carta*\n\n"
+            "1️⃣ **Con una Foto:** Scatta o invia la foto della carta (anche in toploader o slab).\n"
+            "2️⃣ **Con il Numero:** Scrivimi direttamente in chat il nome e il numero, ad esempio:\n"
+            "• `Magikarp 080/073 JAP`\n"
+            "• `Charizard ex 199/165 ITA PSA 10`\n"
+            "• `Pikachu 025/165 KOR`",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard(),
         )
@@ -300,7 +351,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(data.split("_")[1])
         cards = get_user_cards(user_id)
         if not cards:
-            await query.message.reply_text("📭 Il tuo binder è ancora vuoto! Mandami una foto di una carta per iniziare.", reply_markup=main_menu_keyboard())
+            await query.message.reply_text("📭 Il tuo binder è ancora vuoto! Mandami una foto o scrivi il numero di una carta.", reply_markup=main_menu_keyboard())
             return
         idx = max(0, min(idx, len(cards) - 1))
         c = cards[idx]
@@ -341,15 +392,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "market_radar":
         wait = await query.message.reply_text("📡 *Scansiono i trend di mercato ITA/JAP/ENG/KOR...*", parse_mode="Markdown")
-        radar_prompt = """
-        Fornisci un report sintetico e curato in italiano sul mercato Pokémon TCG attuale (Cardmarket e mercato Giapponese/Internazionale).
-        Dividi in due brevi classifiche da 4 carte ciascuna:
-        1. 🔥 CARTE PIÙ CERCATE DEL MOMENTO (alta liquidità e domanda)
-        2. 📈 CARTE CON MAGGIOR RIVALUTAZIONE RECENTE (con percentuale stimata e fascia di prezzo in EUR)
-        Usa emoji e formattazione pulita per Telegram (grassetto con *singolo asterisco*). Massimo 1200 caratteri.
-        """
-        res = client.models.generate_content(model="gemini-2.5-flash", contents=radar_prompt)
-        await wait.edit_text(res.text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        try:
+            radar_prompt = """
+            Fornisci un report sintetico in italiano sul mercato Pokémon TCG attuale (Cardmarket e mercato Giapponese/Internazionale).
+            Dividi in due brevi classifiche da 4 carte ciascuna:
+            1. 🔥 CARTE PIÙ CERCATE DEL MOMENTO (alta liquidità e domanda)
+            2. 📈 CARTE CON MAGGIOR RIVALUTAZIONE RECENTE (con percentuale stimata e fascia di prezzo in EUR)
+            Non usare simboli markdown come asterischi, trattini bassi o parentesi quadre: scrivi testo pulito con emoji e ritorni a capo. Massimo 1000 caratteri.
+            """
+            res = client.models.generate_content(model="gemini-2.5-flash", contents=radar_prompt)
+            await wait.edit_text(res.text, reply_markup=main_menu_keyboard())
+        except Exception as e:
+            await wait.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=main_menu_keyboard())
 
 
 class HealthHandler(BaseHTTPRequestHandler):
