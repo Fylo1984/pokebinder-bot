@@ -27,6 +27,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 DB_FILE = "pokebinder.db"
+MODEL_NAME = "gemini-3.8-flash"
 
 FLAGS = {
     "ITA": "🇮🇹 ITA",
@@ -240,7 +241,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=MODEL_NAME,
             contents=[
                 types.Part.from_bytes(data=bytes(img_bytes), mime_type="image/jpeg"),
                 prompt,
@@ -281,4 +282,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     1. Nome completo della carta (es. "Magikarp AR" o "Giratina V Alt Art")
     2. Nome del set ufficiale
     3. Numero carta (es. "080/073")
-    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR (se non specificata, deducila dal numero/set o
+    4. Lingua scegliendo SOLO tra: ITA, JAP, ENG, KOR (se non specificata, deducila dal numero/set o usa ENG)
+    5. Grado/Condizione (es. "Raw" se non specificato, oppure "PSA 10", "GRAAD 9", ecc.)
+    6. Stima realistica del prezzo di mercato attuale in EUR (numero decimale) per quella specifica lingua e grado
