@@ -14,6 +14,16 @@ DB = "pokebinder.db"
 MODEL = "gemini-3.8-flash"
 FLAGS = {"ITA": "🇮🇹 ITA", "JAP": "🇯🇵 JAP", "ENG": "🇬🇧 ENG", "KOR": "🇰🇷 KOR"}
 
+def ask_gemini(contents):
+    for m in [MODEL, "gemini-2.5-flash-lite"]:
+        try:
+            return client.models.generate_content(model=m, contents=contents).text
+        except Exception as e:
+            if "503" in str(e) or "429" in str(e) or "UNAVAILABLE" in str(e):
+                continue
+            raise e
+    raise RuntimeError("Server Google momentaneamente occupati (503). Riprova tra 10 secondi.")
+
 def init_db():
     with sqlite3.connect(DB) as c:
         c.execute("CREATE TABLE IF NOT EXISTS cards (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, set_name TEXT, card_number TEXT, lang TEXT, grade TEXT, paid_price REAL, market_price REAL, photo_file_id TEXT, added_at TEXT)")
@@ -91,11 +101,11 @@ async def on_photo(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     b = await f.download_as_bytearray()
     p = 'Identifica questa carta Pokemon (Raw o gradata). Rispondi SOLO con JSON senza markdown: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw o PSA 10 ecc","market_price":45.50}'
     try:
-        r = client.models.generate_content(model=MODEL, contents=[types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p])
-        d = json.loads(r.text.strip().replace("```json","").replace("```","").strip())
+        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, [types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p]), timeout=20)
+        d = json.loads(txt.strip().replace("```json","").replace("```","").strip())
         await confirm_card(w, ctx, d, u.message.photo[-1].file_id)
     except Exception as e:
-        await w.edit_text(f"⚠️ Errore: {e}")
+        await w.edit_text(f"⚠️ Server AI occupato, riprova tra qualche secondo. ({e})")
 
 async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = u.message.text.strip()
@@ -112,11 +122,11 @@ async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     w = await u.message.reply_text(f"🔎 *Cerco* `{t}`...", parse_mode="Markdown")
     p = f'Identifica la carta Pokemon "{t}". Rispondi SOLO con JSON senza markdown: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
     try:
-        r = client.models.generate_content(model=MODEL, contents=p)
-        d = json.loads(r.text.strip().replace("```json","").replace("```","").strip())
+        txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p), timeout=20)
+        d = json.loads(txt.strip().replace("```json","").replace("```","").strip())
         await confirm_card(w, ctx, d, fetch_img(d["name"], d["card_number"]))
     except Exception as e:
-        await w.edit_text(f"⚠️ Non trovata ({e}). Riprova con nome e numero (es. `Magikarp 080/073 JAP`).")
+        await w.edit_text(f"⚠️ Riprova tra qualche secondo ({e}). Es: `Magikarp 080/073 JAP`.")
 
 async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = u.callback_query; await q.answer(); uid, data = q.from_user.id, q.data
@@ -139,9 +149,9 @@ async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "radar":
         w = await q.message.reply_text("📡 *Scansiono il mercato...*", parse_mode="Markdown")
         try:
-            r = client.models.generate_content(model=MODEL, contents="Report breve in italiano sul mercato Pokemon TCG attuale: 4 carte piu cercate e 4 con maggior rivalutazione in EUR. Solo testo ed emoji, senza asterischi.")
-            await w.edit_text(r.text, reply_markup=menu_kb())
-        except Exception as e: await w.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=menu_kb())
+            txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, "Report breve in italiano sul mercato Pokemon TCG attuale: 4 carte piu cercate e 4 con maggior rivalutazione in EUR. Solo testo ed emoji, senza asterischi."), timeout=20)
+            await w.edit_text(txt, reply_markup=menu_kb())
+        except Exception as e: await w.edit_text(f"⚠️ {e}", reply_markup=menu_kb())
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
