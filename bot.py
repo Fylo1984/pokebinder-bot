@@ -15,14 +15,17 @@ MODEL = "gemini-3.8-flash"
 FLAGS = {"ITA": "🇮🇹 ITA", "JAP": "🇯🇵 JAP", "ENG": "🇬🇧 ENG", "KOR": "🇰🇷 KOR"}
 
 def ask_gemini(contents):
-    for m in [MODEL, "gemini-2.5-flash-lite"]:
+    for m in [MODEL, "gemini-3.5-flash-lite"]:
         try:
             return client.models.generate_content(model=m, contents=contents).text
         except Exception as e:
-            if "503" in str(e) or "429" in str(e) or "UNAVAILABLE" in str(e):
+            if any(k in str(e) for k in ("503", "429", "UNAVAILABLE")):
                 continue
             raise e
-    raise RuntimeError("Server Google momentaneamente occupati (503). Riprova tra 10 secondi.")
+    raise RuntimeError("Server Google occupati (503). Riprova tra 10 secondi.")
+
+def parse_json(txt):
+    return json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
 
 def init_db():
     with sqlite3.connect(DB) as c:
@@ -47,9 +50,9 @@ def fetch_img(name, num):
         r = requests.get(f"https://api.tcgdex.net/v2/en/cards?name={name.split()[0]}", timeout=5)
         n = num.split("/")[0].lstrip("0")
         for i in r.json():
-            if i.get("image") and (not n or i.get("localId","").lstrip("0") == n): return f"{i['image']}/high.webp"
+            if i.get("image") and (not n or i.get("localId","").lstrip("0") == n): return f"{i['image']}/high.png"
         for i in r.json():
-            if i.get("image"): return f"{i['image']}/high.webp"
+            if i.get("image"): return f"{i['image']}/high.png"
     except Exception: pass
     return "https://images.pokemontcg.io/base1/4_hires.png"
 
@@ -102,10 +105,9 @@ async def on_photo(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     p = 'Identifica questa carta Pokemon (Raw o gradata). Rispondi SOLO con JSON senza markdown: {"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw o PSA 10 ecc","market_price":45.50}'
     try:
         txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, [types.Part.from_bytes(data=bytes(b), mime_type="image/jpeg"), p]), timeout=20)
-        d = json.loads(txt.strip().replace("```json","").replace("```","").strip())
-        await confirm_card(w, ctx, d, u.message.photo[-1].file_id)
+        await confirm_card(w, ctx, parse_json(txt), u.message.photo[-1].file_id)
     except Exception as e:
-        await w.edit_text(f"⚠️ Server AI occupato, riprova tra qualche secondo. ({e})")
+        await w.edit_text(f"⚠️ Riprova tra qualche secondo. ({e})")
 
 async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = u.message.text.strip()
@@ -123,7 +125,7 @@ async def on_text(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
     p = f'Identifica la carta Pokemon "{t}". Rispondi SOLO con JSON senza markdown: {{"name":"...","set_name":"...","card_number":"...","lang":"ITA/JAP/ENG/KOR","grade":"Raw","market_price":45.50}}'
     try:
         txt = await asyncio.wait_for(asyncio.to_thread(ask_gemini, p), timeout=20)
-        d = json.loads(txt.strip().replace("```json","").replace("```","").strip())
+        d = parse_json(txt)
         await confirm_card(w, ctx, d, fetch_img(d["name"], d["card_number"]))
     except Exception as e:
         await w.edit_text(f"⚠️ Riprova tra qualche secondo ({e}). Es: `Magikarp 080/073 JAP`.")
