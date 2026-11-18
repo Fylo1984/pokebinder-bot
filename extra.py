@@ -11,19 +11,55 @@ MODEL = "gemini-3.8-flash"
 FLAGS = {"ITA": "🇮🇹 ITA", "JAP": "🇯🇵 JAP", "ENG": "🇬🇧 ENG", "KOR": "🇰🇷 KOR"}
 
 def ask_gemini(contents, search=True):
-    cfg = types.GenerateContentConfig(tools=[{"google_search": {}}]) if search else None
-    for m in [MODEL, "gemini-3.5-flash-lite"]:
+    tries = [(MODEL, search), ("gemini-3.5-flash-lite", search), ("gemini-3.5-flash-lite", False)]
+    for m, use_s in tries:
         try:
+            cfg = types.GenerateContentConfig(tools=[{"google_search": {}}]) if use_s else None
             return client.models.generate_content(model=m, contents=contents, config=cfg).text
         except Exception as e:
-            if any(k in str(e) for k in ("503", "429", "UNAVAILABLE")):
+            if any(k in str(e) for k in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")):
                 continue
             raise e
-    raise RuntimeError("Server Google occupati (503). Riprova tra 10 secondi.")
+    raise RuntimeError("Server AI momentaneamente occupati. Riprova tra 10 secondi.")
 
 def parse_json(txt, is_list=False):
     a, b = ("[", "]") if is_list else ("{", "}")
     return json.loads(txt[txt.find(a):txt.rfind(b) + 1])
+
+def cm_search(name, num=""):
+    try:
+        n = num.split("/")[0].lstrip("0") if num else ""
+        q = f'name:"{name.split()[0]}"' + (f' number:{n}' if n else "")
+        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": q, "pageSize": 5}, timeout=8).json()
+        for c in r.get("data", []):
+            p = c.get("cardmarket", {}).get("prices", {})
+            val = p.get("trendPrice") or p.get("averageSellPrice") or p.get("avg7")
+            if val:
+                return {"price": float(val), "img": c.get("images", {}).get("large", "")}
+    except Exception: pass
+    return None
+
+def radar_live():
+    r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": 'rarity:"Special Illustration Rare" OR rarity:"Illustration Rare"', "pageSize": 35, "orderBy": "-set.releaseDate"}, timeout=10).json()
+    pool = []
+    for c in r.get("data", []):
+        p = c.get("cardmarket", {}).get("prices", {})
+        t, a30 = p.get("trendPrice") or p.get("avg7") or 0, p.get("avg30") or 0
+        if t >= 12 and a30 >= 8:
+            delta = ((t - a30) / a30) * 100
+            num = f"{c.get('number','')}/{c.get('set',{}).get('printedTotal','')}"
+            pool.append({"name": c["name"], "num": num, "set": c.get("set",{}).get("name",""), "price": t, "a30": a30, "delta": delta, "img": c.get("images",{}).get("large","")})
+    pool.sort(key=lambda x: x["delta"], reverse=True)
+    rising = pool[:2]
+    sleepers = [x for x in pool[2:] if 12 <= x["price"] <= 75][:2] or pool[2:4]
+    picks = [dict(x, tag="📈 IN RIALZO") for x in rising] + [dict(x, tag="🔮 SLEEPER") for x in sleepers]
+    try:
+        summary = "\n".join([f"{i}: {x['name']} ({x['num']}, {x['set']}) Trend {x['price']:.2f}€ vs 30gg {x['a30']:.2f}€ ({x['delta']:+.1f}%)" for i, x in enumerate(picks)])
+        notes = parse_json(ask_gemini(f'Per ciascuna di queste 4 carte Pokemon con dati reali Cardmarket, scrivi una frase brevissima in italiano (max 15 parole) sul perche sta salendo o potrebbe salire a breve:\n{summary}\nRispondi SOLO con JSON: {{"0":"...","1":"...","2":"...","3":"..."}}', search=False))
+        for i, x in enumerate(picks): x["reason"] = notes.get(str(i), f"Momentum Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg.")
+    except Exception:
+        for x in picks: x["reason"] = f"Trend Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg ({x['a30']:.2f} €)."
+    return picks
 
 def init_db():
     with sqlite3.connect(DB) as c:
@@ -68,13 +104,13 @@ def del_wish(wid, uid):
         c.execute("DELETE FROM wishlist WHERE id=? AND user_id=?", (wid, uid))
 
 def fetch_img(name, num):
+    cm = cm_search(name, num)
+    if cm and cm["img"]: return cm["img"]
     try:
         r = requests.get(f"https://api.tcgdex.net/v2/en/cards?name={name.split()[0]}", timeout=5)
         n = num.split("/")[0].lstrip("0")
         for i in r.json():
             if i.get("image") and (not n or i.get("localId","").lstrip("0") == n): return f"{i['image']}/high.png"
-        for i in r.json():
-            if i.get("image"): return f"{i['image']}/high.png"
     except Exception: pass
     return "https://images.pokemontcg.io/base1/4_hires.png"
 
