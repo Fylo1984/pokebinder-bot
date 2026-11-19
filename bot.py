@@ -10,9 +10,10 @@ logging.basicConfig(level=logging.INFO)
 def menu_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Sfoglia Binder", callback_data="binder_all_0"), InlineKeyboardButton("📊 Portafoglio", callback_data="portfolio")],
-        [InlineKeyboardButton("🔥 Radar Mercato", callback_data="radar"), InlineKeyboardButton("🎯 Wishlist", callback_data="wish_view")],
-        [InlineKeyboardButton("🔄 Aggiorna Prezzi", callback_data="sync_prices"), InlineKeyboardButton("📥 Esporta CSV", callback_data="export_csv")],
-        [InlineKeyboardButton("💾 Backup DB", callback_data="backup_db"), InlineKeyboardButton("➕ Guida", callback_data="help")]
+        [InlineKeyboardButton("🔥 Radar Mercato", callback_data="radar"), InlineKeyboardButton("💎 Gemme Under 25€", callback_data="lowcap")],
+        [InlineKeyboardButton("🎯 Wishlist", callback_data="wish_view"), InlineKeyboardButton("🔄 Aggiorna Prezzi", callback_data="sync_prices")],
+        [InlineKeyboardButton("📥 Esporta CSV", callback_data="export_csv"), InlineKeyboardButton("💾 Backup DB", callback_data="backup_db")],
+        [InlineKeyboardButton("➕ Guida", callback_data="help")]
     ])
 
 async def start(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -145,6 +146,16 @@ async def on_btn(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
             rep = "🔥 *RADAR CARDMARKET & PREVISIONI*\n\n" + "\n\n".join([f"{i['tag']}\n🃏 *{i['name']}* (`{i['num']}`) — _{i['set']}_\n💶 *{i['price']:.2f} €* (vs 30gg: *{i['delta']:+.1f}%*)\n💡 {i['reason']}" for i in items])
             await w.edit_text(rep, parse_mode="Markdown", reply_markup=menu_kb())
         except Exception as e: await w.edit_text(f"⚠️ Errore Radar: {e}", reply_markup=menu_kb())
+    elif data == "lowcap":
+        w = await q.message.reply_text("💎 *Scansiono gemme nascoste under 25€...*", parse_mode="Markdown")
+        try:
+            items = await asyncio.wait_for(asyncio.to_thread(lowcap_live), timeout=30)
+            media = [InputMediaPhoto(media=i["img"], caption=f"💎 {i['name']} ({i['num']}) — {i['price']:.2f} €") for i in items if i["img"]]
+            try: await q.message.reply_media_group(media=media)
+            except Exception: pass
+            rep = "💎 *GEMME NASCOSTE UNDER 25€*\n\n" + "\n\n".join([f"🃏 *{i['name']}* (`{i['num']}`) — _{i['set']}_\n💶 Prezzo attuale: *{i['price']:.2f} €*\n💡 *Potenziale futuro:* {i['reason']}" for i in items])
+            await w.edit_text(rep, parse_mode="Markdown", reply_markup=menu_kb())
+        except Exception as e: await w.edit_text(f"⚠️ Errore Low-Cap: {e}", reply_markup=menu_kb())
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
