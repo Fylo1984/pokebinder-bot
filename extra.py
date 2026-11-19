@@ -60,7 +60,6 @@ def radar_live():
                 p = c.get("cardmarket", {}).get("prices", {})
                 t, a30 = p.get("trendPrice") or p.get("avg7") or 0, p.get("avg30") or 0
                 if t >= 10 and a30 >= 5:
-                    delta = ((t - a30) / a30) * c.get('printedTotal', 100) / c.get('printedTotal', 100) * 100 if a30 > 0 else 0
                     delta = ((t - a30) / a30) * 100
                     num = f"{c.get('number','')}/{c.get('set',{}).get('printedTotal','')}"
                     pool.append({"name": c["name"], "num": num, "set": c.get("set",{}).get("name",""), "price": t, "a30": a30, "delta": delta, "img": c.get("images",{}).get("large","")})
@@ -80,11 +79,10 @@ def radar_live():
             for x in picks: x["reason"] = f"Trend Cardmarket {x['delta']:+.1f}% rispetto alla media 30gg."
         return picks
 
-    # Fallback con ricerca live web strutturata
     fallback_prompt = (
         'Cerca sul web i trend attuali reali del mercato Pokemon TCG (Cardmarket/TCGPlayer). '
-        'Seleziona 4 carte (2 IN RIALZO ORA e 2 SLEEPER con potenziale di crescita imminente, escludi carte storiche museo). '
-        'Rispondi SOLO con un array JSON valido di 4 oggetti con questa esatta struttura: '
+        'Seleziona 4 carte (2 IN RIALZO ORA e 2 SLEEPER con potenziale di crescita imminente). '
+        'Rispondi SOLO con un array JSON valido di 4 oggetti: '
         '[{"tag":"📈 IN RIALZO","name":"Nome inglese esatto","num":"215/203","set":"Nome Set","price":125.0,"delta":14.5,"reason":"Motivo breve in italiano"}]'
     )
     txt = ask_gemini(fallback_prompt, search=True)
@@ -92,6 +90,20 @@ def radar_live():
     for x in picks:
         x["price"] = float(str(x.get("price", 0)).replace("€","").replace(",",".").strip() or 0)
         x["delta"] = float(str(x.get("delta", 0)).replace("%","").replace("+","").strip() or 0)
+        x["img"] = fetch_img(x["name"], x.get("num", ""))
+    return picks
+
+def lowcap_live():
+    prompt = (
+        'Cerca su Cardmarket e TCGPlayer 4 carte Pokemon TCG di tipo Illustration Rare (AR) o Promo con prezzo attuale COMPRESO TRA 3€ E 25€ '
+        'che hanno enormi margini di crescita futuri (artisti ricercati, set out-of-print, forte domanda collezionistica). '
+        'Rispondi SOLO con un array JSON valido di 4 oggetti: '
+        '[{"name":"Nome inglese","num":"120/198","set":"Nome Set","price":8.50,"reason":"Motivo del potenziale futuro in italiano"}]'
+    )
+    txt = ask_gemini(prompt, search=True)
+    picks = parse_json(txt, is_list=True)[:4]
+    for x in picks:
+        x["price"] = float(str(x.get("price", 0)).replace("€","").replace(",",".").strip() or 0)
         x["img"] = fetch_img(x["name"], x.get("num", ""))
     return picks
 
