@@ -41,7 +41,7 @@ def cm_search(name, num=""):
     try:
         n = num.split("/")[0].lstrip("0") if num else ""
         q = f'name:"{name.split()[0]}"' + (f' number:{n}' if n else "")
-        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": q, "pageSize": 5}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=5)
+        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": q, "pageSize": 5}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=6)
         if r.status_code == 200 and r.text.strip().startswith("{"):
             for c in r.json().get("data", []):
                 p = c.get("cardmarket", {}).get("prices", {})
@@ -80,21 +80,40 @@ def radar_live():
 
 def lowcap_live():
     try:
-        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": 'rarity:"Illustration Rare"', "pageSize": 40, "orderBy": "-set.releaseDate"}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=6)
-        pool = []
+        r = requests.get("https://api.pokemontcg.io/v2/cards", params={"q": 'rarity:"Illustration Rare"', "pageSize": 60, "orderBy": "-set.releaseDate"}, headers={"User-Agent": "PokeBinderBot/1.0"}, timeout=8)
         if r.status_code == 200 and r.text.strip().startswith("{"):
+            pool = []
             for c in r.json().get("data", []):
                 p = c.get("cardmarket", {}).get("prices", {})
                 price = p.get("trendPrice") or p.get("averageSellPrice") or p.get("avg7") or 0
-                if 3.0 <= price <= 25.0:
+                if 2.5 <= float(price) <= 25.0:
                     num = f"{c.get('number','')}/{c.get('set',{}).get('printedTotal','')}"
-                    pool.append({"name": c["name"], "num": num, "set": c.get("set",{}).get("name",""), "price": float(price), "reason": "Ottimo rapporto qualità/prezzo per collezionisti.", "img": c.get("images",{}).get("large","")})
-        if len(pool) >= 4:
-            return pool[:4]
+                    pool.append({
+                        "name": c["name"], 
+                        "num": num, 
+                        "set": c.get("set",{}).get("name",""), 
+                        "price": float(price), 
+                        "img": c.get("images",{}).get("large","")
+                    })
+            if len(pool) >= 4:
+                picks = pool[:4]
+                summary = "\n".join([f"- {x['name']} ({x['num']}, {x['set']}) a {x['price']:.2f}€" for x in picks])
+                prompt = f'Scrivi una motivazione brevissima in italiano (max 12 parole) sul potenziale futuro di queste carte Pokemon economiche:\n{summary}\nRispondi SOLO con JSON: {{"0":"...","1":"...","2":"...","3":"..."}}'
+                try:
+                    notes = parse_json(ask_gemini(prompt, search=False))
+                    for i, x in enumerate(picks): x["reason"] = notes.get(str(i), "Ottimo rapporto qualità/prezzo per collezionisti.")
+                except Exception:
+                    for x in picks: x["reason"] = "Illustrazione curata e set con margini di crescita."
+                return picks
     except Exception: pass
 
-    # Fallback sicuro protetto under 25€
-    return [
+    # Fallback dinamico via Gemini Search protetto
+    txt = ask_gemini('Cerca 4 carte Pokemon TCG Illustration Rare che costano REALMENTE tra i 3€ e i 25€ su Cardmarket (escludi carte costose). Fornisci prezzi precisi con i centesimi (es. 7.45€). Rispondi SOLO con array JSON: [{"name":"Nome inglese","num":"120/198","set":"Nome Set","price":8.50,"reason":"Motivo in italiano"}]', search=True)
+    picks = parse_json(txt, is_list=True)[:4]
+    for x in picks:
+        x["price"] = float(str(x.get("price", 0)).replace("€","").replace(",",".").strip() or 5.0)
+        x["img"] = fetch_img(x["name"], x.get("num", ""))
+    return picks if len(picks) >= 4 else [
         {"name": "Psyduck", "num": "175/182", "set": "Paradox Rift", "price": 7.50, "reason": "Opera d'arte amatissima e soggetto popolare.", "img": fetch_img("Psyduck", "175/182")},
         {"name": "Pikachu", "num": "170/159", "set": "Prismatic Evolutions", "price": 15.00, "reason": "Grande seguito di fan e forte domanda.", "img": fetch_img("Pikachu", "170/159")},
         {"name": "Gardevoir ex", "num": "228/198", "set": "Scarlet & Violet Base", "price": 18.00, "reason": "Set out-of-print con storyline molto apprezzata.", "img": fetch_img("Gardevoir ex", "228/198")},
